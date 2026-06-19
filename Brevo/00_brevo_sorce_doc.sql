@@ -1,0 +1,260 @@
+-- Brevo source documentation: architecture, objects, data flow, and execution guide
+-- Co-authored with CoCo
+-- =============================================================================
+-- IM PILOT PROJECT | BREVO SOURCE DOCUMENTATION
+-- =============================================================================
+--
+-- WHAT IS BREVO?
+-- Brevo (formerly Sendinblue) is the email marketing & transactional email
+-- platform used by the insurance company to communicate with policyholders.
+-- It sends policy confirmations, payment reminders, renewal notices, and
+-- marketing campaigns.
+--
+-- WHY IS IT IN THIS PROJECT?
+-- Brevo is the communication layer of the IM Pilot. It connects customer
+-- identity (contacts) with business events (policy purchases, payments)
+-- and tracks email delivery/engagement for those communications.
+--
+-- =============================================================================
+-- DATABASE STRUCTURE
+-- =============================================================================
+--
+--   BREVO (Database)
+--     ├── BRONZE (Schema) — Raw data landing zone
+--     ├── SILVER (Schema) — Cleansed, deduplicated, SCD Type 1
+--     └── GOLD   (Schema) — Star schema (dimensions + facts)
+--
+-- =============================================================================
+-- BRONZE LAYER TABLES (BREVO.BRONZE)
+-- =============================================================================
+--
+-- Table                    | Description                                    | PK
+-- -------------------------+------------------------------------------------+----------
+-- BREVO_CONTACT            | Policyholder contacts (email, name, DOB)       | Id
+-- BREVO_EVENT              | Business events: policy, payment, renewal      | Uuid
+-- BREVO_CONTACT_LISTS      | Mailing list definitions (subscriber segments) | Id
+-- BREVO_AGG_REPORT         | Daily aggregated email campaign metrics        | Date Range
+-- BREVO_SMTP_EMAILS        | Individual transactional email sends           | Uuid
+-- BREVO_SMTP_EVENT         | Delivery events for transactional emails       | Message Id
+--
+-- Stage: @BREVO.BRONZE.STG_BREVO (CSV files land here before COPY INTO)
+-- File Format: BREVO.BRONZE.FF_CSV_BREVO
+--
+-- =============================================================================
+-- SILVER LAYER TABLES (BREVO.SILVER)
+-- =============================================================================
+--
+-- Table                        | Description                              | PK
+-- -----------------------------+------------------------------------------+-----------
+-- SLV_CONTACT                  | Deduplicated, validated contacts         | CONTACT_ID
+-- SLV_CONTACT_LIST_MEMBERSHIP  | Flattened contact-to-list mapping        | Composite
+-- SLV_CONTACT_LIST             | Cleansed list definitions                | LIST_ID
+-- SLV_EVENT                    | Cleansed insurance events                | EVENT_UUID
+-- SLV_AGG_REPORT               | Campaign metrics with derived KPIs       | DATE_RANGE
+-- SLV_SMTP_EMAIL               | Cleansed transactional sends             | EMAIL_UUID
+-- SLV_SMTP_EVENT               | Cleansed delivery events                 | SMTP_EVENT_ID
+--
+-- =============================================================================
+-- GOLD LAYER TABLES (BREVO.GOLD) — Star Schema
+-- =============================================================================
+--
+--   FACT_EVENT (PK: EVENT_UUID)
+--     ├── DIM_CONTACT   (FK: CONTACT_ID)    → Who (policyholder)
+--     ├── DIM_POLICY    (FK: POLICY_ID)     → What (policy details)
+--     └── DIM_PLAN      (FK: PLAN_ID_KEY)   → How paid (gateway/plan)
+--
+-- =============================================================================
+-- STREAMS (Change Data Capture on Bronze tables)
+-- =============================================================================
+--
+-- Stream                        | On Table              | Mode
+-- ------------------------------+-----------------------+-----
+-- STREAM_BREVO_CONTACT          | BREVO_CONTACT         | DELTA (APPEND_ONLY=FALSE)
+-- STREAM_BREVO_CONTACT_LISTS    | BREVO_CONTACT_LISTS   | DELTA
+-- STREAM_BREVO_EVENT            | BREVO_EVENT           | DELTA
+-- STREAM_BREVO_AGG_REPORT       | BREVO_AGG_REPORT      | DELTA
+-- STREAM_BREVO_SMTP_EMAILS      | BREVO_SMTP_EMAILS     | DELTA
+-- STREAM_BREVO_SMTP_EVENT       | BREVO_SMTP_EVENT      | DELTA
+--
+-- All streams use SHOW_INITIAL_ROWS = TRUE (captures existing data on first run)
+-- APPEND_ONLY = FALSE allows detecting UPDATEs and DELETEs (needed for SCD)
+--
+-- =============================================================================
+-- STORED PROCEDURES
+-- =============================================================================
+--
+-- BREVO.BRONZE:
+--   GENERATE_INCREMENTAL_DATA(NUM_RECORDS INT)
+--     → Python proc: generates CSV files, PUTs them to @STG_BREVO
+--     → No external network needed (runs inside Snowflake compute)
+--
+--   LOAD_STAGE_TO_BRONZE()
+--     → SQL proc: COPY INTO all 6 Bronze tables from stage files
+--
+-- BREVO.SILVER:
+--   MERGE_SLV_CONTACT()           → Upserts contacts + rebuilds list membership
+--   MERGE_SLV_CONTACT_LIST()      → Upserts mailing list definitions
+--   MERGE_SLV_EVENT()             → Upserts insurance business events
+--   MERGE_SLV_AGG_REPORT()        → Upserts campaign metrics
+--   MERGE_SLV_SMTP_EMAIL()        → Upserts transactional email sends
+--   MERGE_SLV_SMTP_EVENT()        → Upserts email delivery events
+--
+-- BREVO.GOLD:
+--   MERGE_DIM_CONTACT()           → Upserts contact dimension from Silver
+--   MERGE_DIM_POLICY()            → Upserts policy dimension (from events)
+--   MERGE_DIM_PLAN()              → Upserts plan dimension
+--   MERGE_FACT_EVENT()            → Upserts fact table (runs after dims)
+--
+-- =============================================================================
+-- TASK DAG (Fully Automated Pipeline)
+-- =============================================================================
+--
+-- Single chain — one scheduled root, everything cascades:
+--
+--   TASK_GENERATE_TEST_DATA (every 30 min — the ONLY scheduled task)
+--       │  Calls GENERATE_INCREMENTAL_DATA(4)
+--       │  Creates 4 records/table as CSVs → PUTs to @STG_BREVO
+--       │
+--       └── TASK_LOAD_STAGE_TO_BRONZE
+--               │  COPY INTO all 6 Bronze tables from stage
+--               │
+--               └── TASK_CLEANUP_STAGE
+--                       │  REMOVE @BREVO.BRONZE.STG_BREVO (cleans up files)
+--                       │
+--                       └── TASK_SILVER_ROOT
+--                               │  WHEN streams have data
+--                               │
+--                               ├── TASK_MERGE_SLV_CONTACT ──────┐
+--                               ├── TASK_MERGE_SLV_CONTACT_LIST  │
+--                               ├── TASK_MERGE_SLV_EVENT ────────┤
+--                               ├── TASK_MERGE_SLV_AGG_REPORT    │
+--                               ├── TASK_MERGE_SLV_SMTP_EMAIL    │
+--                               └── TASK_MERGE_SLV_SMTP_EVENT    │
+--                                                                 │
+--                               TASK_GOLD_ROOT ←─────────────────┘
+--                                 (after SLV_CONTACT + SLV_EVENT)
+--                                   │
+--                                   ├── TASK_MERGE_DIM_CONTACT
+--                                   ├── TASK_MERGE_DIM_POLICY
+--                                   ├── TASK_MERGE_DIM_PLAN
+--                                   └── TASK_MERGE_FACT_EVENT
+--                                       (after all 3 dims complete)
+--
+-- Total Tasks: 15
+-- Scheduled:   1 (TASK_GENERATE_TEST_DATA every 30 min)
+-- Child Tasks: 14 (triggered via AFTER dependencies)
+--
+-- =============================================================================
+-- DATA FLOW SUMMARY
+-- =============================================================================
+--
+--   ┌─────────────────────────────────────────────────────────────────────┐
+--   │  GENERATE_INCREMENTAL_DATA (Python Stored Procedure)                │
+--   │  → Creates CSV files in /tmp inside Snowflake compute               │
+--   │  → PUTs them to @BREVO.BRONZE.STG_BREVO via session.file.put()      │
+--   └───────────────────────────────┬─────────────────────────────────────┘
+--                                   │
+--                                   ▼
+--   ┌─────────────────────────────────────────────────────────────────────┐
+--   │  @BREVO.BRONZE.STG_BREVO (Internal Stage)                           │
+--   │  Files: BREVO_CONTACT.csv, BREVO_EVENT.csv, etc.                    │
+--   └───────────────────────────────┬─────────────────────────────────────┘
+--                                   │ COPY INTO (MATCH_BY_COLUMN_NAME)
+--                                   ▼
+--   ┌─────────────────────────────────────────────────────────────────────┐
+--   │  BRONZE TABLES (raw data, append-only)                              │
+--   │  → BREVO_CONTACT, BREVO_EVENT, BREVO_CONTACT_LISTS, etc.           │
+--   └───────────────────────────────┬─────────────────────────────────────┘
+--                                   │ STREAMS (DELTA, detect INSERTs)
+--                                   ▼
+--   ┌─────────────────────────────────────────────────────────────────────┐
+--   │  SILVER TABLES (SCD Type 1 — MERGE/Upsert)                         │
+--   │  → SLV_CONTACT, SLV_EVENT, SLV_CONTACT_LIST, etc.                  │
+--   │  → Deduplication, data cleansing, type casting                      │
+--   └───────────────────────────────┬─────────────────────────────────────┘
+--                                   │ MERGE from Silver to Gold
+--                                   ▼
+--   ┌─────────────────────────────────────────────────────────────────────┐
+--   │  GOLD TABLES (Star Schema)                                          │
+--   │  → DIM_CONTACT, DIM_POLICY, DIM_PLAN, FACT_EVENT                   │
+--   │  → Ready for BI reporting and analytics                             │
+--   └─────────────────────────────────────────────────────────────────────┘
+--
+-- =============================================================================
+-- KEY RELATIONSHIPS
+-- =============================================================================
+--
+-- BREVO_CONTACT.Id           = BREVO_EVENT."Contact Id"     (contact → events)
+-- BREVO_CONTACT."List Ids"   = BREVO_CONTACT_LISTS.Id       (contact → lists, JSON array)
+-- BREVO_SMTP_EMAILS.Uuid     → BREVO_SMTP_EVENT."Message Id" (send → delivery)
+--
+-- =============================================================================
+-- FILES & EXECUTION ORDER
+-- =============================================================================
+--
+-- File                              | What it does
+-- ----------------------------------+--------------------------------------------
+-- 00_brevo_source_doc.sql           | This documentation file
+-- 01_create_brevo_objects.sql       | Database, schema, stage, tables, COPY INTO
+-- 02_brevo_silver_layer.sql         | Silver tables, streams, MERGE procedures
+-- 03_brevo_gold_layer.sql           | Gold tables (dims + fact), MERGE procedures
+-- 04_brevo_pipeline_orchestration.sql | Procedures + Task DAG (full automation)
+-- 05_brevo_demo_validation.sql      | Demo script to validate pipeline end-to-end
+-- generate_brevo_dummy_data.py      | Python file (prints proc SQL for reference)
+--
+-- EXECUTION ORDER:
+--   1. 01_create_brevo_objects.sql       (needs CSVs on stage first)
+--   2. 02_brevo_silver_layer.sql         (creates silver layer + streams)
+--   3. 03_brevo_gold_layer.sql           (creates gold layer)
+--   4. 04_brevo_pipeline_orchestration.sql (procedures + tasks — starts automation)
+--   5. 05_brevo_demo_validation.sql      (optional — run to validate everything)
+--
+-- =============================================================================
+-- MANUAL TESTING
+-- =============================================================================
+--
+-- Generate data + trigger pipeline manually:
+--   CALL BREVO.BRONZE.GENERATE_INCREMENTAL_DATA(4);
+--   EXECUTE TASK BREVO.BRONZE.TASK_GENERATE_TEST_DATA;
+--
+-- Check task history:
+--   SELECT NAME, STATE, COMPLETED_TIME, ERROR_MESSAGE
+--   FROM TABLE(BREVO.INFORMATION_SCHEMA.TASK_HISTORY(
+--       SCHEDULED_TIME_RANGE_START => DATEADD(HOUR, -1, CURRENT_TIMESTAMP()),
+--       RESULT_LIMIT => 30
+--   ))
+--   ORDER BY COMPLETED_TIME DESC;
+--
+-- Check streams:
+--   SELECT SYSTEM$STREAM_HAS_DATA('BREVO.BRONZE.STREAM_BREVO_CONTACT');
+--
+-- Suspend/Resume all tasks:
+--   ALTER TASK BREVO.BRONZE.TASK_GENERATE_TEST_DATA SUSPEND;  -- stops everything
+--   ALTER TASK BREVO.BRONZE.TASK_GENERATE_TEST_DATA RESUME;   -- starts everything
+--
+-- =============================================================================
+-- DESIGN DECISIONS
+-- =============================================================================
+--
+-- 1. APPEND_ONLY = FALSE on streams
+--    → Supports SCD Type 1 (Silver) and future SCD Type 2 (Gold)
+--    → Captures INSERT, UPDATE, DELETE operations
+--
+-- 2. SHOW_INITIAL_ROWS = TRUE
+--    → Ensures streams capture existing data on first run (bulk load)
+--    → After initial consumption, only new changes are captured
+--
+-- 3. Python proc for data generation (not workspace terminal)
+--    → Workspace sandbox blocks external network (PUT fails from terminal)
+--    → Python procs run inside Snowflake compute with full S3 access
+--
+-- 4. REMOVE as direct task body (not in a procedure)
+--    → Snowflake blocks REMOVE inside any stored procedure (SQL or Python)
+--    → TASK_CLEANUP_STAGE executes REMOVE directly as its body
+--
+-- 5. Single scheduled root task (TASK_GENERATE_TEST_DATA)
+--    → All other tasks chain via AFTER dependencies
+--    → Guarantees data generation completes before processing starts
+--    → One task to suspend/resume to control the entire pipeline
+--
+-- =============================================================================
