@@ -1,0 +1,364 @@
+-- Meta Gold layer: SCD Type 2 dimensions and fact table for ad insights analytics
+-- Co-authored with CoCo
+-- =============================================================================
+-- META ADS SOURCE | GOLD LAYER
+-- Star Schema: SCD Type 2 Dimensions + Fact Table
+-- Source: META.SILVER -> META.GOLD
+-- =============================================================================
+
+CREATE SCHEMA IF NOT EXISTS META.GOLD;
+
+-- =============================================================================
+-- STEP 1: DIMENSION TABLES (SCD Type 2)
+-- =============================================================================
+
+CREATE OR REPLACE TABLE META.GOLD.DIM_AD_ACCOUNT (
+    DIM_AD_ACCOUNT_SK       NUMBER AUTOINCREMENT,
+    ACCOUNT_ID              NUMBER,
+    ACCOUNT_NAME            VARCHAR,
+    ACCOUNT_STATUS          NUMBER,
+    CURRENCY                VARCHAR,
+    TIMEZONE_NAME           VARCHAR,
+    BUSINESS_ID             NUMBER,
+    BUSINESS_NAME           VARCHAR,
+    EFFECTIVE_START_DATE    TIMESTAMP_NTZ,
+    EFFECTIVE_END_DATE      TIMESTAMP_NTZ   DEFAULT '9999-12-31'::TIMESTAMP_NTZ,
+    IS_CURRENT              BOOLEAN         DEFAULT TRUE,
+    GOLD_LOADED_AT          TIMESTAMP_NTZ   DEFAULT CURRENT_TIMESTAMP(),
+    GOLD_UPDATED_AT         TIMESTAMP_NTZ   DEFAULT CURRENT_TIMESTAMP()
+);
+
+CREATE OR REPLACE TABLE META.GOLD.DIM_CAMPAIGN (
+    DIM_CAMPAIGN_SK         NUMBER AUTOINCREMENT,
+    CAMPAIGN_ID             NUMBER,
+    CAMPAIGN_NAME           VARCHAR,
+    STATUS                  VARCHAR,
+    EFFECTIVE_STATUS        VARCHAR,
+    OBJECTIVE               VARCHAR,
+    BUYING_TYPE             VARCHAR,
+    DAILY_BUDGET            NUMBER,
+    LIFETIME_BUDGET         NUMBER,
+    AD_ACCOUNT_ID           NUMBER,
+    EFFECTIVE_START_DATE    TIMESTAMP_NTZ,
+    EFFECTIVE_END_DATE      TIMESTAMP_NTZ   DEFAULT '9999-12-31'::TIMESTAMP_NTZ,
+    IS_CURRENT              BOOLEAN         DEFAULT TRUE,
+    GOLD_LOADED_AT          TIMESTAMP_NTZ   DEFAULT CURRENT_TIMESTAMP(),
+    GOLD_UPDATED_AT         TIMESTAMP_NTZ   DEFAULT CURRENT_TIMESTAMP()
+);
+
+CREATE OR REPLACE TABLE META.GOLD.DIM_ADSET (
+    DIM_ADSET_SK            NUMBER AUTOINCREMENT,
+    ADSET_ID                NUMBER,
+    ADSET_NAME              VARCHAR,
+    CAMPAIGN_ID             NUMBER,
+    STATUS                  VARCHAR,
+    EFFECTIVE_STATUS        VARCHAR,
+    BID_STRATEGY            VARCHAR,
+    OPTIMIZATION_GOAL       VARCHAR,
+    DAILY_BUDGET            NUMBER,
+    LIFETIME_BUDGET         NUMBER,
+    AD_ACCOUNT_ID           NUMBER,
+    EFFECTIVE_START_DATE    TIMESTAMP_NTZ,
+    EFFECTIVE_END_DATE      TIMESTAMP_NTZ   DEFAULT '9999-12-31'::TIMESTAMP_NTZ,
+    IS_CURRENT              BOOLEAN         DEFAULT TRUE,
+    GOLD_LOADED_AT          TIMESTAMP_NTZ   DEFAULT CURRENT_TIMESTAMP(),
+    GOLD_UPDATED_AT         TIMESTAMP_NTZ   DEFAULT CURRENT_TIMESTAMP()
+);
+
+CREATE OR REPLACE TABLE META.GOLD.DIM_AD (
+    DIM_AD_SK               NUMBER AUTOINCREMENT,
+    AD_ID                   NUMBER,
+    AD_NAME                 VARCHAR,
+    ADSET_ID                NUMBER,
+    CAMPAIGN_ID             NUMBER,
+    STATUS                  VARCHAR,
+    EFFECTIVE_STATUS        VARCHAR,
+    CREATIVE_ID             NUMBER,
+    CREATIVE_NAME           VARCHAR,
+    CREATIVE_TITLE          VARCHAR,
+    CREATIVE_CTA_TYPE       VARCHAR,
+    AD_ACCOUNT_ID           NUMBER,
+    EFFECTIVE_START_DATE    TIMESTAMP_NTZ,
+    EFFECTIVE_END_DATE      TIMESTAMP_NTZ   DEFAULT '9999-12-31'::TIMESTAMP_NTZ,
+    IS_CURRENT              BOOLEAN         DEFAULT TRUE,
+    GOLD_LOADED_AT          TIMESTAMP_NTZ   DEFAULT CURRENT_TIMESTAMP(),
+    GOLD_UPDATED_AT         TIMESTAMP_NTZ   DEFAULT CURRENT_TIMESTAMP()
+);
+
+CREATE OR REPLACE TABLE META.GOLD.DIM_DATE (
+    DATE_ID                 DATE            NOT NULL PRIMARY KEY,
+    YEAR                    NUMBER,
+    QUARTER                 NUMBER,
+    MONTH                   NUMBER,
+    MONTH_NAME              VARCHAR,
+    DAY_OF_MONTH            NUMBER,
+    DAY_NAME                VARCHAR,
+    IS_WEEKEND              BOOLEAN
+);
+
+-- =============================================================================
+-- STEP 2: FACT TABLE
+-- =============================================================================
+
+CREATE OR REPLACE TABLE META.GOLD.FACT_AD_INSIGHT (
+    INSIGHT_SK              NUMBER AUTOINCREMENT,
+    DIM_AD_ACCOUNT_SK       NUMBER,
+    DIM_CAMPAIGN_SK         NUMBER,
+    DIM_ADSET_SK            NUMBER,
+    DIM_AD_SK               NUMBER,
+    AD_ID                   NUMBER,
+    ADSET_ID                NUMBER,
+    CAMPAIGN_ID             NUMBER,
+    AD_ACCOUNT_ID           NUMBER,
+    DATE_START_ID           DATE,
+    DATE_STOP_ID            DATE,
+    IMPRESSIONS             NUMBER,
+    REACH                   NUMBER,
+    CLICKS                  NUMBER,
+    SPEND                   NUMBER,
+    CPC                     NUMBER,
+    CPM                     NUMBER,
+    CTR                     NUMBER,
+    ACTIONS_RAW             VARCHAR,
+    GOLD_LOADED_AT          TIMESTAMP_NTZ   DEFAULT CURRENT_TIMESTAMP(),
+    GOLD_UPDATED_AT         TIMESTAMP_NTZ   DEFAULT CURRENT_TIMESTAMP()
+);
+
+-- =============================================================================
+-- STEP 3: MERGE PROCEDURES (SCD Type 2 Dimensions)
+-- =============================================================================
+
+-- -----------------------------------------------------------------------------
+-- MERGE_DIM_AD_ACCOUNT (SCD Type 2)
+-- -----------------------------------------------------------------------------
+CREATE OR REPLACE PROCEDURE META.GOLD.MERGE_DIM_AD_ACCOUNT()
+RETURNS VARCHAR
+LANGUAGE SQL
+AS
+$$
+BEGIN
+    -- Close existing current records where attributes have changed
+    UPDATE META.GOLD.DIM_AD_ACCOUNT tgt
+    SET EFFECTIVE_END_DATE = CURRENT_TIMESTAMP(), IS_CURRENT = FALSE, GOLD_UPDATED_AT = CURRENT_TIMESTAMP()
+    WHERE tgt.IS_CURRENT = TRUE
+      AND EXISTS (
+          SELECT 1 FROM META.SILVER.SLV_AD_ACCOUNT src
+          WHERE src.ACCOUNT_ID = tgt.ACCOUNT_ID AND src.IS_VALID_RECORD = TRUE AND src.IS_DELETED = FALSE
+            AND (COALESCE(src.ACCOUNT_NAME, '') != COALESCE(tgt.ACCOUNT_NAME, '')
+                OR COALESCE(src.ACCOUNT_STATUS, 0) != COALESCE(tgt.ACCOUNT_STATUS, 0)
+                OR COALESCE(src.CURRENCY, '') != COALESCE(tgt.CURRENCY, '')
+                OR COALESCE(src.BUSINESS_NAME, '') != COALESCE(tgt.BUSINESS_NAME, ''))
+      );
+
+    -- Insert new current version for changed + new accounts
+    INSERT INTO META.GOLD.DIM_AD_ACCOUNT (ACCOUNT_ID, ACCOUNT_NAME, ACCOUNT_STATUS, CURRENCY,
+        TIMEZONE_NAME, BUSINESS_ID, BUSINESS_NAME, EFFECTIVE_START_DATE)
+    SELECT src.ACCOUNT_ID, src.ACCOUNT_NAME, src.ACCOUNT_STATUS, src.CURRENCY,
+           src.TIMEZONE_NAME, src.BUSINESS_ID, src.BUSINESS_NAME, CURRENT_TIMESTAMP()
+    FROM META.SILVER.SLV_AD_ACCOUNT src
+    WHERE src.IS_VALID_RECORD = TRUE AND src.IS_DELETED = FALSE
+      AND NOT EXISTS (SELECT 1 FROM META.GOLD.DIM_AD_ACCOUNT tgt WHERE tgt.ACCOUNT_ID = src.ACCOUNT_ID AND tgt.IS_CURRENT = TRUE);
+
+    RETURN 'MERGE_DIM_AD_ACCOUNT (SCD2) completed at ' || CURRENT_TIMESTAMP()::VARCHAR;
+END;
+$$;
+
+-- -----------------------------------------------------------------------------
+-- MERGE_DIM_CAMPAIGN (SCD Type 2)
+-- -----------------------------------------------------------------------------
+CREATE OR REPLACE PROCEDURE META.GOLD.MERGE_DIM_CAMPAIGN()
+RETURNS VARCHAR
+LANGUAGE SQL
+AS
+$$
+BEGIN
+    UPDATE META.GOLD.DIM_CAMPAIGN tgt
+    SET EFFECTIVE_END_DATE = CURRENT_TIMESTAMP(), IS_CURRENT = FALSE, GOLD_UPDATED_AT = CURRENT_TIMESTAMP()
+    WHERE tgt.IS_CURRENT = TRUE
+      AND EXISTS (
+          SELECT 1 FROM META.SILVER.SLV_CAMPAIGN src
+          WHERE src.CAMPAIGN_ID = tgt.CAMPAIGN_ID AND src.IS_VALID_RECORD = TRUE AND src.IS_DELETED = FALSE
+            AND (COALESCE(src.CAMPAIGN_NAME, '') != COALESCE(tgt.CAMPAIGN_NAME, '')
+                OR COALESCE(src.STATUS, '') != COALESCE(tgt.STATUS, '')
+                OR COALESCE(src.EFFECTIVE_STATUS, '') != COALESCE(tgt.EFFECTIVE_STATUS, '')
+                OR COALESCE(src.OBJECTIVE, '') != COALESCE(tgt.OBJECTIVE, '')
+                OR COALESCE(src.DAILY_BUDGET, 0) != COALESCE(tgt.DAILY_BUDGET, 0)
+                OR COALESCE(src.LIFETIME_BUDGET, 0) != COALESCE(tgt.LIFETIME_BUDGET, 0))
+      );
+
+    INSERT INTO META.GOLD.DIM_CAMPAIGN (CAMPAIGN_ID, CAMPAIGN_NAME, STATUS, EFFECTIVE_STATUS,
+        OBJECTIVE, BUYING_TYPE, DAILY_BUDGET, LIFETIME_BUDGET, AD_ACCOUNT_ID, EFFECTIVE_START_DATE)
+    SELECT src.CAMPAIGN_ID, src.CAMPAIGN_NAME, src.STATUS, src.EFFECTIVE_STATUS,
+           src.OBJECTIVE, src.BUYING_TYPE, src.DAILY_BUDGET, src.LIFETIME_BUDGET,
+           src.AD_ACCOUNT_ID, CURRENT_TIMESTAMP()
+    FROM META.SILVER.SLV_CAMPAIGN src
+    WHERE src.IS_VALID_RECORD = TRUE AND src.IS_DELETED = FALSE
+      AND NOT EXISTS (SELECT 1 FROM META.GOLD.DIM_CAMPAIGN tgt WHERE tgt.CAMPAIGN_ID = src.CAMPAIGN_ID AND tgt.IS_CURRENT = TRUE);
+
+    RETURN 'MERGE_DIM_CAMPAIGN (SCD2) completed at ' || CURRENT_TIMESTAMP()::VARCHAR;
+END;
+$$;
+
+-- -----------------------------------------------------------------------------
+-- MERGE_DIM_ADSET (SCD Type 2)
+-- -----------------------------------------------------------------------------
+CREATE OR REPLACE PROCEDURE META.GOLD.MERGE_DIM_ADSET()
+RETURNS VARCHAR
+LANGUAGE SQL
+AS
+$$
+BEGIN
+    UPDATE META.GOLD.DIM_ADSET tgt
+    SET EFFECTIVE_END_DATE = CURRENT_TIMESTAMP(), IS_CURRENT = FALSE, GOLD_UPDATED_AT = CURRENT_TIMESTAMP()
+    WHERE tgt.IS_CURRENT = TRUE
+      AND EXISTS (
+          SELECT 1 FROM META.SILVER.SLV_ADSET src
+          WHERE src.ADSET_ID = tgt.ADSET_ID AND src.IS_VALID_RECORD = TRUE AND src.IS_DELETED = FALSE
+            AND (COALESCE(src.ADSET_NAME, '') != COALESCE(tgt.ADSET_NAME, '')
+                OR COALESCE(src.STATUS, '') != COALESCE(tgt.STATUS, '')
+                OR COALESCE(src.EFFECTIVE_STATUS, '') != COALESCE(tgt.EFFECTIVE_STATUS, '')
+                OR COALESCE(src.BID_STRATEGY, '') != COALESCE(tgt.BID_STRATEGY, '')
+                OR COALESCE(src.OPTIMIZATION_GOAL, '') != COALESCE(tgt.OPTIMIZATION_GOAL, '')
+                OR COALESCE(src.DAILY_BUDGET, 0) != COALESCE(tgt.DAILY_BUDGET, 0))
+      );
+
+    INSERT INTO META.GOLD.DIM_ADSET (ADSET_ID, ADSET_NAME, CAMPAIGN_ID, STATUS, EFFECTIVE_STATUS,
+        BID_STRATEGY, OPTIMIZATION_GOAL, DAILY_BUDGET, LIFETIME_BUDGET, AD_ACCOUNT_ID, EFFECTIVE_START_DATE)
+    SELECT src.ADSET_ID, src.ADSET_NAME, src.CAMPAIGN_ID, src.STATUS, src.EFFECTIVE_STATUS,
+           src.BID_STRATEGY, src.OPTIMIZATION_GOAL, src.DAILY_BUDGET, src.LIFETIME_BUDGET,
+           src.AD_ACCOUNT_ID, CURRENT_TIMESTAMP()
+    FROM META.SILVER.SLV_ADSET src
+    WHERE src.IS_VALID_RECORD = TRUE AND src.IS_DELETED = FALSE
+      AND NOT EXISTS (SELECT 1 FROM META.GOLD.DIM_ADSET tgt WHERE tgt.ADSET_ID = src.ADSET_ID AND tgt.IS_CURRENT = TRUE);
+
+    RETURN 'MERGE_DIM_ADSET (SCD2) completed at ' || CURRENT_TIMESTAMP()::VARCHAR;
+END;
+$$;
+
+-- -----------------------------------------------------------------------------
+-- MERGE_DIM_AD (SCD Type 2)
+-- -----------------------------------------------------------------------------
+CREATE OR REPLACE PROCEDURE META.GOLD.MERGE_DIM_AD()
+RETURNS VARCHAR
+LANGUAGE SQL
+AS
+$$
+BEGIN
+    UPDATE META.GOLD.DIM_AD tgt
+    SET EFFECTIVE_END_DATE = CURRENT_TIMESTAMP(), IS_CURRENT = FALSE, GOLD_UPDATED_AT = CURRENT_TIMESTAMP()
+    WHERE tgt.IS_CURRENT = TRUE
+      AND EXISTS (
+          SELECT 1 FROM META.SILVER.SLV_AD src
+          WHERE src.AD_ID = tgt.AD_ID AND src.IS_VALID_RECORD = TRUE AND src.IS_DELETED = FALSE
+            AND (COALESCE(src.AD_NAME, '') != COALESCE(tgt.AD_NAME, '')
+                OR COALESCE(src.STATUS, '') != COALESCE(tgt.STATUS, '')
+                OR COALESCE(src.EFFECTIVE_STATUS, '') != COALESCE(tgt.EFFECTIVE_STATUS, '')
+                OR COALESCE(src.CREATIVE_NAME, '') != COALESCE(tgt.CREATIVE_NAME, '')
+                OR COALESCE(src.CREATIVE_TITLE, '') != COALESCE(tgt.CREATIVE_TITLE, ''))
+      );
+
+    INSERT INTO META.GOLD.DIM_AD (AD_ID, AD_NAME, ADSET_ID, CAMPAIGN_ID, STATUS, EFFECTIVE_STATUS,
+        CREATIVE_ID, CREATIVE_NAME, CREATIVE_TITLE, CREATIVE_CTA_TYPE, AD_ACCOUNT_ID, EFFECTIVE_START_DATE)
+    SELECT src.AD_ID, src.AD_NAME, src.ADSET_ID, src.CAMPAIGN_ID, src.STATUS,
+           src.EFFECTIVE_STATUS, src.CREATIVE_ID, src.CREATIVE_NAME, src.CREATIVE_TITLE,
+           src.CREATIVE_CTA_TYPE, src.AD_ACCOUNT_ID, CURRENT_TIMESTAMP()
+    FROM META.SILVER.SLV_AD src
+    WHERE src.IS_VALID_RECORD = TRUE AND src.IS_DELETED = FALSE
+      AND NOT EXISTS (SELECT 1 FROM META.GOLD.DIM_AD tgt WHERE tgt.AD_ID = src.AD_ID AND tgt.IS_CURRENT = TRUE);
+
+    RETURN 'MERGE_DIM_AD (SCD2) completed at ' || CURRENT_TIMESTAMP()::VARCHAR;
+END;
+$$;
+
+-- -----------------------------------------------------------------------------
+-- POPULATE_DIM_DATE
+-- -----------------------------------------------------------------------------
+CREATE OR REPLACE PROCEDURE META.GOLD.POPULATE_DIM_DATE()
+RETURNS VARCHAR
+LANGUAGE SQL
+AS
+$$
+BEGIN
+    TRUNCATE TABLE META.GOLD.DIM_DATE;
+    INSERT INTO META.GOLD.DIM_DATE (DATE_ID, YEAR, QUARTER, MONTH, MONTH_NAME, DAY_OF_MONTH, DAY_NAME, IS_WEEKEND)
+    SELECT
+        DATEADD(DAY, seq4(), '2020-01-01')::DATE AS DATE_ID,
+        YEAR(DATE_ID),
+        QUARTER(DATE_ID),
+        MONTH(DATE_ID),
+        MONTHNAME(DATE_ID),
+        DAY(DATE_ID),
+        DAYNAME(DATE_ID),
+        CASE WHEN DAYOFWEEK(DATE_ID) IN (0, 6) THEN TRUE ELSE FALSE END
+    FROM TABLE(GENERATOR(ROWCOUNT => 3650));
+    RETURN 'POPULATE_DIM_DATE completed with 10 years of dates';
+END;
+$$;
+
+-- =============================================================================
+-- STEP 4: FACT TABLE MERGE PROCEDURE
+-- =============================================================================
+
+CREATE OR REPLACE PROCEDURE META.GOLD.MERGE_FACT_AD_INSIGHT()
+RETURNS VARCHAR
+LANGUAGE SQL
+AS
+$$
+BEGIN
+    MERGE INTO META.GOLD.FACT_AD_INSIGHT AS tgt
+    USING (
+        SELECT
+            i.AD_ID, i.ADSET_ID, i.CAMPAIGN_ID, i.AD_ACCOUNT_ID,
+            i.DATE_START AS DATE_START_ID, i.DATE_STOP AS DATE_STOP_ID,
+            i.IMPRESSIONS, i.REACH, i.CLICKS, i.SPEND, i.CPC, i.CPM, i.CTR, i.ACTIONS_RAW,
+            da.DIM_AD_SK, das.DIM_ADSET_SK, dc.DIM_CAMPAIGN_SK, dac.DIM_AD_ACCOUNT_SK
+        FROM META.SILVER.SLV_INSIGHT_AD i
+        LEFT JOIN META.GOLD.DIM_AD da ON i.AD_ID = da.AD_ID AND da.IS_CURRENT = TRUE
+        LEFT JOIN META.GOLD.DIM_ADSET das ON i.ADSET_ID = das.ADSET_ID AND das.IS_CURRENT = TRUE
+        LEFT JOIN META.GOLD.DIM_CAMPAIGN dc ON i.CAMPAIGN_ID = dc.CAMPAIGN_ID AND dc.IS_CURRENT = TRUE
+        LEFT JOIN META.GOLD.DIM_AD_ACCOUNT dac ON i.AD_ACCOUNT_ID = dac.ACCOUNT_ID AND dac.IS_CURRENT = TRUE
+        WHERE i.IS_VALID_RECORD = TRUE AND i.IS_VALID_DATE_RANGE = TRUE AND i.IS_DELETED = FALSE
+        QUALIFY ROW_NUMBER() OVER (PARTITION BY i.AD_ID, i.DATE_START, i.DATE_STOP ORDER BY i.AUDIT_UPDATED_AT DESC NULLS LAST) = 1
+    ) AS src
+    ON tgt.AD_ID = src.AD_ID AND tgt.DATE_START_ID = src.DATE_START_ID AND tgt.DATE_STOP_ID = src.DATE_STOP_ID
+    WHEN MATCHED THEN
+        UPDATE SET
+            tgt.DIM_AD_ACCOUNT_SK = src.DIM_AD_ACCOUNT_SK, tgt.DIM_CAMPAIGN_SK = src.DIM_CAMPAIGN_SK,
+            tgt.DIM_ADSET_SK = src.DIM_ADSET_SK, tgt.DIM_AD_SK = src.DIM_AD_SK,
+            tgt.ADSET_ID = src.ADSET_ID, tgt.CAMPAIGN_ID = src.CAMPAIGN_ID,
+            tgt.AD_ACCOUNT_ID = src.AD_ACCOUNT_ID, tgt.IMPRESSIONS = src.IMPRESSIONS,
+            tgt.REACH = src.REACH, tgt.CLICKS = src.CLICKS, tgt.SPEND = src.SPEND,
+            tgt.CPC = src.CPC, tgt.CPM = src.CPM, tgt.CTR = src.CTR,
+            tgt.ACTIONS_RAW = src.ACTIONS_RAW, tgt.GOLD_UPDATED_AT = CURRENT_TIMESTAMP()
+    WHEN NOT MATCHED THEN
+        INSERT (DIM_AD_ACCOUNT_SK, DIM_CAMPAIGN_SK, DIM_ADSET_SK, DIM_AD_SK,
+                AD_ID, ADSET_ID, CAMPAIGN_ID, AD_ACCOUNT_ID,
+                DATE_START_ID, DATE_STOP_ID, IMPRESSIONS, REACH, CLICKS,
+                SPEND, CPC, CPM, CTR, ACTIONS_RAW)
+        VALUES (src.DIM_AD_ACCOUNT_SK, src.DIM_CAMPAIGN_SK, src.DIM_ADSET_SK, src.DIM_AD_SK,
+                src.AD_ID, src.ADSET_ID, src.CAMPAIGN_ID, src.AD_ACCOUNT_ID,
+                src.DATE_START_ID, src.DATE_STOP_ID, src.IMPRESSIONS, src.REACH, src.CLICKS,
+                src.SPEND, src.CPC, src.CPM, src.CTR, src.ACTIONS_RAW);
+
+    RETURN 'MERGE_FACT_AD_INSIGHT completed at ' || CURRENT_TIMESTAMP()::VARCHAR;
+END;
+$$;
+
+-- =============================================================================
+-- STEP 5: EXECUTE (populate Gold layer)
+-- =============================================================================
+CALL META.GOLD.POPULATE_DIM_DATE();
+CALL META.GOLD.MERGE_DIM_AD_ACCOUNT();
+CALL META.GOLD.MERGE_DIM_CAMPAIGN();
+CALL META.GOLD.MERGE_DIM_ADSET();
+CALL META.GOLD.MERGE_DIM_AD();
+CALL META.GOLD.MERGE_FACT_AD_INSIGHT();
+
+-- Verify row counts
+SELECT 'META.GOLD.DIM_AD_ACCOUNT' AS TABLE_NAME, COUNT(*) AS ROW_COUNT FROM META.GOLD.DIM_AD_ACCOUNT
+UNION ALL SELECT 'META.GOLD.DIM_CAMPAIGN', COUNT(*) FROM META.GOLD.DIM_CAMPAIGN
+UNION ALL SELECT 'META.GOLD.DIM_ADSET', COUNT(*) FROM META.GOLD.DIM_ADSET
+UNION ALL SELECT 'META.GOLD.DIM_AD', COUNT(*) FROM META.GOLD.DIM_AD
+UNION ALL SELECT 'META.GOLD.DIM_DATE', COUNT(*) FROM META.GOLD.DIM_DATE
+UNION ALL SELECT 'META.GOLD.FACT_AD_INSIGHT', COUNT(*) FROM META.GOLD.FACT_AD_INSIGHT
+ORDER BY TABLE_NAME;
