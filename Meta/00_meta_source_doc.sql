@@ -1,0 +1,205 @@
+-- Meta Ads source documentation: architecture, objects, data flow, and execution guide
+-- Co-authored with CoCo
+-- =============================================================================
+-- IM PILOT PROJECT | META ADS SOURCE DOCUMENTATION
+-- =============================================================================
+--
+-- WHAT IS META ADS?
+-- Meta Ads (Facebook/Instagram Ads) is the paid advertising platform used by
+-- the insurance company to acquire new customers, retarget existing
+-- policyholders, and drive awareness campaigns for insurance products.
+--
+-- WHY IS IT IN THIS PROJECT?
+-- Meta Ads is the customer acquisition layer of the IM Pilot. It connects
+-- advertising spend (campaigns, ad sets, ads) with performance metrics
+-- (impressions, clicks, conversions) to enable marketing ROI analysis.
+--
+-- =============================================================================
+-- DATABASE STRUCTURE
+-- =============================================================================
+--
+--   META (Database)
+--     +-- BRONZE (Schema) - Raw data landing zone
+--     +-- SILVER (Schema) - Cleansed, deduplicated, validated
+--     +-- GOLD   (Schema) - Star schema (dimensions + facts)
+--
+-- =============================================================================
+-- BRONZE LAYER TABLES (META.BRONZE)
+-- =============================================================================
+--
+-- Table                    | Description                                    | PK
+-- -------------------------+------------------------------------------------+----------
+-- META_AD_ACCOUNT          | Ad account details (spend, balance, business)  | ACCOUNT_ID
+-- META_CAMPAIGN            | Campaign definitions (objective, budget)       | ID
+-- META_ADSET               | Ad set targeting & bidding configuration       | ID
+-- META_ADS                 | Individual ad creatives                        | ID
+-- META_CUSTOM_AUDIENCE     | Audience segments for targeting                | ID
+-- META_INSIGHT_ACCOUNT     | Account-level daily performance metrics        | Composite
+-- META_INSIGHT_CAMPAIGN    | Campaign-level daily performance metrics       | Composite
+-- META_INSIGHT_ADSET       | Ad set-level daily performance metrics         | Composite
+-- META_INSIGHT_AD          | Ad-level daily performance metrics             | Composite
+--
+-- Stage: @META.BRONZE.STG_META (CSV files land here before COPY INTO)
+-- File Format: META.BRONZE.FF_CSV_INFER
+--
+-- =============================================================================
+-- SILVER LAYER TABLES (META.SILVER)
+-- =============================================================================
+--
+-- Table                        | Description                              | PK
+-- -----------------------------+------------------------------------------+-----------
+-- SLV_AD_ACCOUNT               | Cleansed ad account master data          | ACCOUNT_ID
+-- SLV_CAMPAIGN                  | Cleansed campaign definitions            | CAMPAIGN_ID
+-- SLV_ADSET                     | Cleansed ad set configurations           | ADSET_ID
+-- SLV_AD                        | Cleansed ad creatives                    | AD_ID
+-- SLV_CUSTOM_AUDIENCE           | Cleansed audience segments               | AUDIENCE_ID
+-- SLV_INSIGHT_ACCOUNT           | Validated account-level metrics          | Composite
+-- SLV_INSIGHT_CAMPAIGN          | Validated campaign-level metrics         | Composite
+-- SLV_INSIGHT_ADSET             | Validated ad set-level metrics           | Composite
+-- SLV_INSIGHT_AD                | Validated ad-level metrics               | Composite
+--
+-- =============================================================================
+-- GOLD LAYER TABLES (META.GOLD) - Star Schema
+-- =============================================================================
+--
+--   FACT_AD_INSIGHT (PK: INSIGHT_SK)
+--     +-- DIM_AD_ACCOUNT (FK: DIM_AD_ACCOUNT_SK) - Who (advertiser)
+--     +-- DIM_CAMPAIGN   (FK: DIM_CAMPAIGN_SK)   - Why (campaign objective)
+--     +-- DIM_ADSET      (FK: DIM_ADSET_SK)      - How (targeting/bidding)
+--     +-- DIM_AD         (FK: DIM_AD_SK)         - What (creative)
+--     +-- DIM_DATE       (FK: DATE_START_ID)     - When (reporting period)
+--
+-- =============================================================================
+-- STREAMS (Change Data Capture on Bronze tables)
+-- =============================================================================
+--
+-- Stream                            | On Table                | Mode
+-- ----------------------------------+-------------------------+-----
+-- STREAM_META_AD_ACCOUNT            | META_AD_ACCOUNT         | DELTA
+-- STREAM_META_CAMPAIGN              | META_CAMPAIGN           | DELTA
+-- STREAM_META_ADSET                 | META_ADSET              | DELTA
+-- STREAM_META_ADS                   | META_ADS                | DELTA
+-- STREAM_META_CUSTOM_AUDIENCE       | META_CUSTOM_AUDIENCE    | DELTA
+-- STREAM_META_INSIGHT_ACCOUNT       | META_INSIGHT_ACCOUNT    | DELTA
+-- STREAM_META_INSIGHT_CAMPAIGN      | META_INSIGHT_CAMPAIGN   | DELTA
+-- STREAM_META_INSIGHT_ADSET         | META_INSIGHT_ADSET      | DELTA
+-- STREAM_META_INSIGHT_AD            | META_INSIGHT_AD         | DELTA
+--
+-- =============================================================================
+-- STORED PROCEDURES
+-- =============================================================================
+--
+-- META.SILVER:
+--   MERGE_SLV_AD_ACCOUNT()        - Upserts ad account data
+--   MERGE_SLV_CAMPAIGN()          - Upserts campaign definitions
+--   MERGE_SLV_ADSET()             - Upserts ad set configurations
+--   MERGE_SLV_AD()                - Upserts ad creatives
+--   MERGE_SLV_CUSTOM_AUDIENCE()   - Upserts audience segments
+--   MERGE_SLV_INSIGHT_ACCOUNT()   - Upserts account metrics
+--   MERGE_SLV_INSIGHT_CAMPAIGN()  - Upserts campaign metrics
+--   MERGE_SLV_INSIGHT_ADSET()     - Upserts ad set metrics
+--   MERGE_SLV_INSIGHT_AD()        - Upserts ad metrics
+--
+-- META.GOLD:
+--   MERGE_DIM_AD_ACCOUNT()        - SCD2 account dimension
+--   MERGE_DIM_CAMPAIGN()          - SCD2 campaign dimension
+--   MERGE_DIM_ADSET()             - SCD2 ad set dimension
+--   MERGE_DIM_AD()                - SCD2 ad dimension
+--   POPULATE_DIM_DATE()           - Date dimension (10 years)
+--   MERGE_FACT_AD_INSIGHT()       - Upserts fact table (runs after dims)
+--
+-- =============================================================================
+-- TASK DAG (Fully Automated Pipeline)
+-- =============================================================================
+--
+--   TASK_META_SILVER_ROOT (every 30 min)
+--       |  WHEN streams have data
+--       |
+--       +-- TASK_MERGE_SLV_AD_ACCOUNT
+--       +-- TASK_MERGE_SLV_CAMPAIGN
+--       +-- TASK_MERGE_SLV_ADSET
+--       +-- TASK_MERGE_SLV_AD
+--       +-- TASK_MERGE_SLV_CUSTOM_AUDIENCE
+--       +-- TASK_MERGE_SLV_INSIGHT_ACCOUNT
+--       +-- TASK_MERGE_SLV_INSIGHT_CAMPAIGN
+--       +-- TASK_MERGE_SLV_INSIGHT_ADSET
+--       +-- TASK_MERGE_SLV_INSIGHT_AD
+--       |
+--       +-- TASK_META_GOLD_ROOT (after all silver tasks)
+--               |
+--               +-- TASK_MERGE_DIM_AD_ACCOUNT
+--               +-- TASK_MERGE_DIM_CAMPAIGN
+--               +-- TASK_MERGE_DIM_ADSET
+--               +-- TASK_MERGE_DIM_AD
+--               +-- TASK_MERGE_FACT_AD_INSIGHT (after all dims)
+--
+-- =============================================================================
+-- DATA FLOW SUMMARY
+-- =============================================================================
+--
+--   +---------------------------------------------------------------------+
+--   |  External: Meta Marketing API (via ETL tool)                        |
+--   |  -> Extracts ad accounts, campaigns, adsets, ads, insights          |
+--   |  -> Writes CSV files to @META.BRONZE.STG_META                       |
+--   +------------------------------------+--------------------------------+
+--                                        |
+--                                        v
+--   +---------------------------------------------------------------------+
+--   |  @META.BRONZE.STG_META (Internal Stage)                             |
+--   |  Files: ad_account.csv, campaign.csv, adset.csv, ads.csv, etc.      |
+--   +------------------------------------+--------------------------------+
+--                                        | COPY INTO (MATCH_BY_COLUMN_NAME)
+--                                        v
+--   +---------------------------------------------------------------------+
+--   |  BRONZE TABLES (raw data, append-only)                              |
+--   |  -> META_AD_ACCOUNT, META_CAMPAIGN, META_ADSET, META_ADS, etc.     |
+--   +------------------------------------+--------------------------------+
+--                                        | STREAMS (DELTA, detect INSERTs)
+--                                        v
+--   +---------------------------------------------------------------------+
+--   |  SILVER TABLES (SCD Type 1 - MERGE/Upsert)                         |
+--   |  -> SLV_AD_ACCOUNT, SLV_CAMPAIGN, SLV_ADSET, SLV_AD, etc.         |
+--   |  -> Deduplication, data cleansing, type casting, validation         |
+--   +------------------------------------+--------------------------------+
+--                                        | MERGE from Silver to Gold
+--                                        v
+--   +---------------------------------------------------------------------+
+--   |  GOLD TABLES (Star Schema - SCD Type 2 Dimensions)                  |
+--   |  -> DIM_AD_ACCOUNT, DIM_CAMPAIGN, DIM_ADSET, DIM_AD, DIM_DATE      |
+--   |  -> FACT_AD_INSIGHT                                                 |
+--   |  -> Ready for BI reporting and marketing analytics                  |
+--   +---------------------------------------------------------------------+
+--
+-- =============================================================================
+-- KEY RELATIONSHIPS
+-- =============================================================================
+--
+-- META_ADS.CAMPAIGN_ID       = META_CAMPAIGN.ID        (ad -> campaign)
+-- META_ADS.ADSET_ID          = META_ADSET.ID           (ad -> ad set)
+-- META_ADSET.CAMPAIGN_ID     = META_CAMPAIGN.ID        (ad set -> campaign)
+-- META_INSIGHT_AD.AD_ID      = META_ADS.ID             (insight -> ad)
+-- META_INSIGHT_AD.ADSET_ID   = META_ADSET.ID           (insight -> ad set)
+-- META_INSIGHT_AD.CAMPAIGN_ID= META_CAMPAIGN.ID        (insight -> campaign)
+-- All tables share AD_ACCOUNT_ID                       (links to ad account)
+--
+-- =============================================================================
+-- FILES & EXECUTION ORDER
+-- =============================================================================
+--
+-- File                                 | What it does
+-- -------------------------------------+--------------------------------------------
+-- 00_meta_source_doc.sql               | This documentation file
+-- 01_meta_bronze_layer.sql             | Database, schema, stage, tables, COPY INTO
+-- 02_meta_silver_layer.sql             | Silver tables, streams, MERGE procedures
+-- 03_meta_gold_layer.sql               | Gold tables (dims + fact), MERGE procedures
+-- 04_meta_pipeline_orchestration.sql   | Task DAG (full automation)
+-- 05_meta_demo_validation.sql          | Demo script to validate pipeline end-to-end
+--
+-- EXECUTION ORDER:
+--   1. 01_meta_bronze_layer.sql          (needs CSVs on stage first)
+--   2. 02_meta_silver_layer.sql          (creates silver layer + streams)
+--   3. 03_meta_gold_layer.sql            (creates gold layer)
+--   4. 04_meta_pipeline_orchestration.sql (tasks - starts automation)
+--   5. 05_meta_demo_validation.sql       (optional - run to validate everything)
+--
+-- =============================================================================
